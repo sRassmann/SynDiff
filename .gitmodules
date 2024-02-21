@@ -1,0 +1,3 @@
+[submodule "flairsyn"]
+	path = flairsyn
+	url = git@github.com:sRassmann/flairsyn.git
