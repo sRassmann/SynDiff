@@ -17,8 +17,19 @@ from torch.multiprocessing import Process
 import torch.distributed as dist
 import shutil
 from skimage.metrics import peak_signal_noise_ratio as psnr
-from image_similarity_measures.quality_metrics import ssim
+from monai.metrics import SSIMMetric
 
+from backbones.discriminator import Discriminator_small, Discriminator_large
+from backbones.ncsnpp_generator_adagn import NCSNpp
+import backbones.generator_resnet
+from utils.EMA import EMA
+
+from flairsyn.lib.datasets import create_loaders
+from flairsyn.lib.utils.visualization import save_grid
+from flairsyn.lib.utils.run_utils import setup_ddp
+from omegaconf import OmegaConf
+from tqdm import tqdm
+import torchinfo
 from torch.utils.tensorboard import SummaryWriter
 
 torch.multiprocessing.set_sharing_strategy("file_system")
@@ -29,8 +40,10 @@ def copy_source(file, output_dir):
 
 
 def broadcast_params(params):
-    for param in params:
-        dist.broadcast(param.data, src=0)
+    # if running in DPP
+    if dist.is_initialized():
+        for param in params:
+            dist.broadcast(param.data, src=0)
 
 
 # %% Diffusion coefficients
@@ -216,17 +229,6 @@ def sample_from_model(coefficients, generator, n_time, x_init, T, opt):
     return x
 
 
-from backbones.discriminator import Discriminator_small, Discriminator_large
-from backbones.ncsnpp_generator_adagn import NCSNpp
-import backbones.generator_resnet
-from utils.EMA import EMA
-
-from flairsyn.lib.datasets import create_loaders
-from flairsyn.lib.utils.visualization import save_grid
-from flairsyn.lib.utils.run_utils import setup_ddp
-from omegaconf import OmegaConf
-from tqdm import tqdm
-
 config = OmegaConf.load("defaults.yml")["data"]
 
 
@@ -245,7 +247,8 @@ def train_syndiff(args):
     nz = args.nz  # latent dimension
 
     if rank == 0:
-        writer = SummaryWriter(log_dir=os.path.join(save_dir, "tb"))
+        os.makedirs(os.path.join(args.output_path, args.exp, "tb"), exist_ok=True)
+        writer = SummaryWriter(log_dir=os.path.join(args.output_path, args.exp, "tb"))
 
     config.batch_size = batch_size
     train_loader, val_loader = create_loaders(**config)
@@ -254,10 +257,14 @@ def train_syndiff(args):
     val_psnr_values = np.zeros([2, args.num_epoch, len(val_loader)])
     val_ssim_values = np.zeros([2, args.num_epoch, len(val_loader)])
     to_range_0_1 = lambda x: (x + 1.0) / 2.0
+    ssim = SSIMMetric(spatial_dims=2)
 
     # networks performing reverse denoising
     gen_diffusive_1 = NCSNpp(args).to(device)
     gen_diffusive_2 = NCSNpp(args).to(device)
+    # print("Diffusive generator")
+    # torchinfo.summary(gen_diffusive_1, input_size=(batch_size, 2, 256, 256))
+
     # networks performing translation
     args.num_channels = 1
     gen_non_diffusive_1to2 = backbones.generator_resnet.define_G(
@@ -266,6 +273,8 @@ def train_syndiff(args):
     gen_non_diffusive_2to1 = backbones.generator_resnet.define_G(
         netG="resnet_6blocks", gpu_ids=[rank]
     )
+    # print("Non-diffusive generator")
+    # torchinfo.summary(gen_non_diffusive_1to2, input_size=(batch_size, 2, 256, 256))
 
     disc_diffusive_1 = Discriminator_large(
         nc=2, ngf=args.ngf, t_emb_dim=args.t_emb_dim, act=nn.LeakyReLU(0.2)
@@ -273,9 +282,13 @@ def train_syndiff(args):
     disc_diffusive_2 = Discriminator_large(
         nc=2, ngf=args.ngf, t_emb_dim=args.t_emb_dim, act=nn.LeakyReLU(0.2)
     ).to(device)
+    # print("Diffusive discriminator")
+    # torchinfo.summary(disc_diffusive_1, input_size=(batch_size, 2, 256, 256))
 
     disc_non_diffusive_cycle1 = backbones.generator_resnet.define_D(gpu_ids=[rank])
     disc_non_diffusive_cycle2 = backbones.generator_resnet.define_D(gpu_ids=[rank])
+    # print("Non-diffusive discriminator")
+    # torchinfo.summary(disc_non_diffusive_cycle1, input_size=(batch_size, 2, 256, 256))
 
     broadcast_params(gen_diffusive_1.parameters())
     broadcast_params(gen_diffusive_2.parameters())
@@ -366,31 +379,32 @@ def train_syndiff(args):
     )
 
     # ddp
-    gen_diffusive_1 = nn.parallel.DistributedDataParallel(
-        gen_diffusive_1, device_ids=[rank]
-    )
-    gen_diffusive_2 = nn.parallel.DistributedDataParallel(
-        gen_diffusive_2, device_ids=[rank]
-    )
-    gen_non_diffusive_1to2 = nn.parallel.DistributedDataParallel(
-        gen_non_diffusive_1to2, device_ids=[rank]
-    )
-    gen_non_diffusive_2to1 = nn.parallel.DistributedDataParallel(
-        gen_non_diffusive_2to1, device_ids=[rank]
-    )
-    disc_diffusive_1 = nn.parallel.DistributedDataParallel(
-        disc_diffusive_1, device_ids=[rank]
-    )
-    disc_diffusive_2 = nn.parallel.DistributedDataParallel(
-        disc_diffusive_2, device_ids=[rank]
-    )
+    if dist.is_initialized():
+        gen_diffusive_1 = nn.parallel.DistributedDataParallel(
+            gen_diffusive_1, device_ids=[rank]
+        )
+        gen_diffusive_2 = nn.parallel.DistributedDataParallel(
+            gen_diffusive_2, device_ids=[rank]
+        )
+        gen_non_diffusive_1to2 = nn.parallel.DistributedDataParallel(
+            gen_non_diffusive_1to2, device_ids=[rank]
+        )
+        gen_non_diffusive_2to1 = nn.parallel.DistributedDataParallel(
+            gen_non_diffusive_2to1, device_ids=[rank]
+        )
+        disc_diffusive_1 = nn.parallel.DistributedDataParallel(
+            disc_diffusive_1, device_ids=[rank]
+        )
+        disc_diffusive_2 = nn.parallel.DistributedDataParallel(
+            disc_diffusive_2, device_ids=[rank]
+        )
 
-    disc_non_diffusive_cycle1 = nn.parallel.DistributedDataParallel(
-        disc_non_diffusive_cycle1, device_ids=[rank]
-    )
-    disc_non_diffusive_cycle2 = nn.parallel.DistributedDataParallel(
-        disc_non_diffusive_cycle2, device_ids=[rank]
-    )
+        disc_non_diffusive_cycle1 = nn.parallel.DistributedDataParallel(
+            disc_non_diffusive_cycle1, device_ids=[rank]
+        )
+        disc_non_diffusive_cycle2 = nn.parallel.DistributedDataParallel(
+            disc_non_diffusive_cycle2, device_ids=[rank]
+        )
 
     exp = args.exp
     output_path = args.output_path
@@ -838,40 +852,41 @@ def train_syndiff(args):
                 normalize=True,
             )
 
-            if args.save_content:
-                if epoch % args.save_content_every == 0:
-                    print("Saving content.")
-                    content = {
-                        "epoch": epoch + 1,
-                        "global_step": global_step,
-                        "args": args,
-                        "gen_diffusive_1_dict": gen_diffusive_1.state_dict(),
-                        "optimizer_gen_diffusive_1": optimizer_gen_diffusive_1.state_dict(),
-                        "gen_diffusive_2_dict": gen_diffusive_2.state_dict(),
-                        "optimizer_gen_diffusive_2": optimizer_gen_diffusive_2.state_dict(),
-                        "scheduler_gen_diffusive_1": scheduler_gen_diffusive_1.state_dict(),
-                        "disc_diffusive_1_dict": disc_diffusive_1.state_dict(),
-                        "scheduler_gen_diffusive_2": scheduler_gen_diffusive_2.state_dict(),
-                        "disc_diffusive_2_dict": disc_diffusive_2.state_dict(),
-                        "gen_non_diffusive_1to2_dict": gen_non_diffusive_1to2.state_dict(),
-                        "optimizer_gen_non_diffusive_1to2": optimizer_gen_non_diffusive_1to2.state_dict(),
-                        "gen_non_diffusive_2to1_dict": gen_non_diffusive_2to1.state_dict(),
-                        "optimizer_gen_non_diffusive_2to1": optimizer_gen_non_diffusive_2to1.state_dict(),
-                        "scheduler_gen_non_diffusive_1to2": scheduler_gen_non_diffusive_1to2.state_dict(),
-                        "scheduler_gen_non_diffusive_2to1": scheduler_gen_non_diffusive_2to1.state_dict(),
-                        "optimizer_disc_diffusive_1": optimizer_disc_diffusive_1.state_dict(),
-                        "scheduler_disc_diffusive_1": scheduler_disc_diffusive_1.state_dict(),
-                        "optimizer_disc_diffusive_2": optimizer_disc_diffusive_2.state_dict(),
-                        "scheduler_disc_diffusive_2": scheduler_disc_diffusive_2.state_dict(),
-                        "optimizer_disc_non_diffusive_cycle1": optimizer_disc_non_diffusive_cycle1.state_dict(),
-                        "scheduler_disc_non_diffusive_cycle1": scheduler_disc_non_diffusive_cycle1.state_dict(),
-                        "optimizer_disc_non_diffusive_cycle2": optimizer_disc_non_diffusive_cycle2.state_dict(),
-                        "scheduler_disc_non_diffusive_cycle2": scheduler_disc_non_diffusive_cycle2.state_dict(),
-                        "disc_non_diffusive_cycle1_dict": disc_non_diffusive_cycle1.state_dict(),
-                        "disc_non_diffusive_cycle2_dict": disc_non_diffusive_cycle2.state_dict(),
-                    }
-
-                    torch.save(content, os.path.join(exp_path, "content.pth"))
+            # doesn't work in EMA anyways
+            # if args.save_content:
+            #     if epoch % args.save_content_every == 0:
+            #         print("Saving content.")
+            #         content = {
+            #             "epoch": epoch + 1,
+            #             "global_step": global_step,
+            #             "args": args,
+            #             "gen_diffusive_1_dict": gen_diffusive_1.state_dict(),
+            #             "optimizer_gen_diffusive_1": optimizer_gen_diffusive_1.state_dict(),
+            #             "gen_diffusive_2_dict": gen_diffusive_2.state_dict(),
+            #             "optimizer_gen_diffusive_2": optimizer_gen_diffusive_2.state_dict(),
+            #             "scheduler_gen_diffusive_1": scheduler_gen_diffusive_1.state_dict(),
+            #             "disc_diffusive_1_dict": disc_diffusive_1.state_dict(),
+            #             "scheduler_gen_diffusive_2": scheduler_gen_diffusive_2.state_dict(),
+            #             "disc_diffusive_2_dict": disc_diffusive_2.state_dict(),
+            #             "gen_non_diffusive_1to2_dict": gen_non_diffusive_1to2.state_dict(),
+            #             "optimizer_gen_non_diffusive_1to2": optimizer_gen_non_diffusive_1to2.state_dict(),
+            #             "gen_non_diffusive_2to1_dict": gen_non_diffusive_2to1.state_dict(),
+            #             "optimizer_gen_non_diffusive_2to1": optimizer_gen_non_diffusive_2to1.state_dict(),
+            #             "scheduler_gen_non_diffusive_1to2": scheduler_gen_non_diffusive_1to2.state_dict(),
+            #             "scheduler_gen_non_diffusive_2to1": scheduler_gen_non_diffusive_2to1.state_dict(),
+            #             "optimizer_disc_diffusive_1": optimizer_disc_diffusive_1.state_dict(),
+            #             "scheduler_disc_diffusive_1": scheduler_disc_diffusive_1.state_dict(),
+            #             "optimizer_disc_diffusive_2": optimizer_disc_diffusive_2.state_dict(),
+            #             "scheduler_disc_diffusive_2": scheduler_disc_diffusive_2.state_dict(),
+            #             "optimizer_disc_non_diffusive_cycle1": optimizer_disc_non_diffusive_cycle1.state_dict(),
+            #             "scheduler_disc_non_diffusive_cycle1": scheduler_disc_non_diffusive_cycle1.state_dict(),
+            #             "optimizer_disc_non_diffusive_cycle2": optimizer_disc_non_diffusive_cycle2.state_dict(),
+            #             "scheduler_disc_non_diffusive_cycle2": scheduler_disc_non_diffusive_cycle2.state_dict(),
+            #             "disc_non_diffusive_cycle1_dict": disc_non_diffusive_cycle1.state_dict(),
+            #             "disc_non_diffusive_cycle2_dict": disc_non_diffusive_cycle2.state_dict(),
+            #         }
+            #
+            #         torch.save(content, os.path.join(exp_path, "content.pth"))
 
             if epoch % args.save_ckpt_every == 0:
                 if args.use_ema:
@@ -938,15 +953,15 @@ def train_syndiff(args):
             real_data = to_range_0_1(real_data)
             real_data = real_data / real_data.mean()
 
+            val_ssim_values[0, epoch, iteration] = (
+                ssim(real_data, fake_sample1).mean().item()
+            )
             fake_sample1 = fake_sample1.cpu().numpy()
             real_data = real_data.cpu().numpy()
             val_l1_loss[0, epoch, iteration] = abs(fake_sample1 - real_data).mean()
 
             val_psnr_values[0, epoch, iteration] = psnr(
                 real_data, fake_sample1, data_range=real_data.max()
-            )
-            ssim_avg[0, epoch, iteration] = ssim(
-                real_data[:, 0].transpose(), fake_sample2[:, 0].transpose(), max_p=1
             )
 
         for iteration, batch in enumerate(val_loader):
@@ -967,6 +982,9 @@ def train_syndiff(args):
             real_data = to_range_0_1(real_data)
             real_data = real_data / real_data.mean()
 
+            val_ssim_values[1, epoch, iteration] = (
+                ssim(real_data, fake_sample1).mean().item()
+            )
             fake_sample1 = fake_sample1.cpu().numpy()
             real_data = real_data.cpu().numpy()
             val_l1_loss[1, epoch, iteration] = abs(fake_sample1 - real_data).mean()
@@ -974,28 +992,36 @@ def train_syndiff(args):
             val_psnr_values[1, epoch, iteration] = psnr(
                 real_data, fake_sample1, data_range=real_data.max()
             )
-            ssim_avg[1, epoch, iteration] = ssim(
-                real_data[:, 0].transpose(), fake_sample2[:, 0].transpose(), max_p=1
-            )
 
-        writer.add_scalar(
-            f"Val PSNR {guidance_seq}", np.nanmean(val_psnr_values[0, epoch, :]), epoch
-        )
-        writer.add_scalar(
-            f"Val PSNR {target_seq}", np.nanmean(val_psnr_values[1, epoch, :]), epoch
-        )
-        writer.add_scalar(
-            f"Val L1 Loss {guidance_seq}", np.nanmean(val_l1_loss[0, epoch, :]), epoch
-        )
-        writer.add_scalar(
-            f"Val L1 Loss {target_seq}", np.nanmean(val_l1_loss[1, epoch, :]), epoch
-        )
-        writer.add_scalar(
-            f"Val SSIM {guidance_seq}", np.nanmean(ssim_avg[0, epoch, :]), epoch
-        )
-        writer.add_scalar(
-            f"Val SSIM {target_seq}", np.nanmean(ssim_avg[1, epoch, :]), epoch
-        )
+        if rank == 0:  # a bit stupid to use only rank 0, but it's fine
+            writer.add_scalar(
+                f"Val PSNR {guidance_seq}",
+                np.nanmean(val_psnr_values[0, epoch, :]),
+                epoch,
+            )
+            writer.add_scalar(
+                f"Val PSNR {target_seq}",
+                np.nanmean(val_psnr_values[1, epoch, :]),
+                epoch,
+            )
+            writer.add_scalar(
+                f"Val L1 Loss {guidance_seq}",
+                np.nanmean(val_l1_loss[0, epoch, :]),
+                epoch,
+            )
+            writer.add_scalar(
+                f"Val L1 Loss {target_seq}", np.nanmean(val_l1_loss[1, epoch, :]), epoch
+            )
+            writer.add_scalar(
+                f"Val SSIM {guidance_seq}",
+                np.nanmean(val_ssim_values[0, epoch, :]),
+                epoch,
+            )
+            writer.add_scalar(
+                f"Val SSIM {target_seq}",
+                np.nanmean(val_ssim_values[1, epoch, :]),
+                epoch,
+            )
 
 
 if __name__ == "__main__":
@@ -1095,7 +1121,7 @@ if __name__ == "__main__":
     # geenrator and training
     parser.add_argument("--exp", default="ixi_synth", help="name of experiment")
     parser.add_argument("--input_path", help="path to input data")
-    parser.add_argument("--output_path", help="path to output saves")
+    parser.add_argument("--output_path", default="output", help="path to output saves")
     parser.add_argument("--nz", type=int, default=100)
     parser.add_argument("--num_timesteps", type=int, default=4)
 
@@ -1140,20 +1166,6 @@ if __name__ == "__main__":
         help="weightening of l1 loss part of diffusion ans cycle models",
     )
 
-    ###ddp
-    parser.add_argument(
-        "--num_proc_node",
-        type=int,
-        default=1,
-        help="The number of nodes in multi node env.",
-    )
-    parser.add_argument(
-        "--num_process_per_node", type=int, default=1, help="number of gpus"
-    )
-    parser.add_argument("--node_rank", type=int, default=0, help="The index of node.")
-    parser.add_argument(
-        "--master_address", type=str, default="127.0.0.1", help="address for master"
-    )
     parser.add_argument(
         "--contrast1", type=str, default="t1", help="contrast selection for model"
     )
@@ -1165,8 +1177,6 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    args.world_size = args.num_proc_node * args.num_process_per_node
-    size = args.num_process_per_node
 
     train_syndiff(args)
 
