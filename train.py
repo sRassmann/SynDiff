@@ -228,8 +228,6 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 
 config = OmegaConf.load("defaults.yml")["data"]
-guidance_seq = "t2"
-target_seq = "flair"
 
 
 def train_syndiff(args):
@@ -237,6 +235,12 @@ def train_syndiff(args):
     device = torch.device(f"cuda:{rank}")
 
     batch_size = args.batch_size
+
+    # arbitrary sequence names
+    guidance_seq = args.contrast1
+    target_seq = args.contrast2
+    config.guidance_sequences = [guidance_seq]
+    config.target_sequence = target_seq
 
     nz = args.nz  # latent dimension
 
@@ -1151,10 +1155,10 @@ if __name__ == "__main__":
         "--master_address", type=str, default="127.0.0.1", help="address for master"
     )
     parser.add_argument(
-        "--contrast1", type=str, default="T1", help="contrast selection for model"
+        "--contrast1", type=str, default="t1", help="contrast selection for model"
     )
     parser.add_argument(
-        "--contrast2", type=str, default="T2", help="contrast selection for model"
+        "--contrast2", type=str, default="flair", help="contrast selection for model"
     )
     parser.add_argument(
         "--port_num", type=str, default="6021", help="port selection for code"
