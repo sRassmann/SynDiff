@@ -1,0 +1,17 @@
+data:
+  dataset: "../data/RS/RS_train_split.json"
+  data_dir: "../data/RS/conformed_mask_reg"
+  batch_size: 1
+  img_size:
+    - 256
+    - 256
+  skull_strip: true
+  num_workers: 4
+  slice_thickness: 1
+  cache: "persistent"
+  target_sequence: "flair"
+  guidance_sequences:
+    - "t1"
+    - "t2"
+  subset_train: null
+  subset_val: null

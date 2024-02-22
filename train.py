@@ -211,69 +211,35 @@ def sample_from_model(coefficients, generator, n_time, x_init, T, opt):
     return x
 
 
-# %%
-def train_syndiff(rank, gpu, args):
-    from backbones.discriminator import Discriminator_small, Discriminator_large
+from backbones.discriminator import Discriminator_small, Discriminator_large
+from backbones.ncsnpp_generator_adagn import NCSNpp
+import backbones.generator_resnet
+from utils.EMA import EMA
 
-    from backbones.ncsnpp_generator_adagn import NCSNpp
+from flairsyn.lib.datasets import create_loaders
+from flairsyn.lib.utils.visualization import save_grid
+from flairsyn.lib.utils.run_utils import setup_ddp
+from omegaconf import OmegaConf
+from tqdm import tqdm
 
-    import backbones.generator_resnet
+config = OmegaConf.load("defaults.yml")["data"]
+guidance_seq = "t2"
+target_seq = "flair"
 
-    from utils.EMA import EMA
 
-    # rank = args.node_rank * args.num_process_per_node + gpu
-
-    torch.manual_seed(args.seed + rank)
-    torch.cuda.manual_seed(args.seed + rank)
-    torch.cuda.manual_seed_all(args.seed + rank)
-    device = torch.device("cuda:{}".format(gpu))
+def train_syndiff(args):
+    rank, world_size = setup_ddp()
+    device = torch.device(f"cuda:{rank}")
 
     batch_size = args.batch_size
 
     nz = args.nz  # latent dimension
 
-    dataset = CreateDatasetSynthesis(
-        phase="train",
-        input_path=args.input_path,
-        contrast1=args.contrast1,
-        contrast2=args.contrast2,
-    )
-    dataset_val = CreateDatasetSynthesis(
-        phase="val",
-        input_path=args.input_path,
-        contrast1=args.contrast1,
-        contrast2=args.contrast2,
-    )
+    config.batch_size = batch_size
+    train_loader, val_loader = create_loaders(**config)
 
-    train_sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset, num_replicas=args.world_size, rank=rank
-    )
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-        sampler=train_sampler,
-        drop_last=True,
-    )
-    val_sampler = torch.utils.data.distributed.DistributedSampler(
-        dataset_val, num_replicas=args.world_size, rank=rank
-    )
-    data_loader_val = torch.utils.data.DataLoader(
-        dataset_val,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True,
-        sampler=val_sampler,
-        drop_last=True,
-    )
-
-    val_l1_loss = np.zeros([2, args.num_epoch, len(data_loader_val)])
-    val_psnr_values = np.zeros([2, args.num_epoch, len(data_loader_val)])
-    print("train data size:" + str(len(data_loader)))
-    print("val data size:" + str(len(data_loader_val)))
+    val_l1_loss = np.zeros([2, args.num_epoch, len(val_loader)])
+    val_psnr_values = np.zeros([2, args.num_epoch, len(val_loader)])
     to_range_0_1 = lambda x: (x + 1.0) / 2.0
 
     # networks performing reverse denoising
@@ -282,10 +248,10 @@ def train_syndiff(rank, gpu, args):
     # networks performing translation
     args.num_channels = 1
     gen_non_diffusive_1to2 = backbones.generator_resnet.define_G(
-        netG="resnet_6blocks", gpu_ids=[gpu]
+        netG="resnet_6blocks", gpu_ids=[rank]
     )
     gen_non_diffusive_2to1 = backbones.generator_resnet.define_G(
-        netG="resnet_6blocks", gpu_ids=[gpu]
+        netG="resnet_6blocks", gpu_ids=[rank]
     )
 
     disc_diffusive_1 = Discriminator_large(
@@ -295,8 +261,8 @@ def train_syndiff(rank, gpu, args):
         nc=2, ngf=args.ngf, t_emb_dim=args.t_emb_dim, act=nn.LeakyReLU(0.2)
     ).to(device)
 
-    disc_non_diffusive_cycle1 = backbones.generator_resnet.define_D(gpu_ids=[gpu])
-    disc_non_diffusive_cycle2 = backbones.generator_resnet.define_D(gpu_ids=[gpu])
+    disc_non_diffusive_cycle1 = backbones.generator_resnet.define_D(gpu_ids=[rank])
+    disc_non_diffusive_cycle2 = backbones.generator_resnet.define_D(gpu_ids=[rank])
 
     broadcast_params(gen_diffusive_1.parameters())
     broadcast_params(gen_diffusive_2.parameters())
@@ -388,29 +354,29 @@ def train_syndiff(rank, gpu, args):
 
     # ddp
     gen_diffusive_1 = nn.parallel.DistributedDataParallel(
-        gen_diffusive_1, device_ids=[gpu]
+        gen_diffusive_1, device_ids=[rank]
     )
     gen_diffusive_2 = nn.parallel.DistributedDataParallel(
-        gen_diffusive_2, device_ids=[gpu]
+        gen_diffusive_2, device_ids=[rank]
     )
     gen_non_diffusive_1to2 = nn.parallel.DistributedDataParallel(
-        gen_non_diffusive_1to2, device_ids=[gpu]
+        gen_non_diffusive_1to2, device_ids=[rank]
     )
     gen_non_diffusive_2to1 = nn.parallel.DistributedDataParallel(
-        gen_non_diffusive_2to1, device_ids=[gpu]
+        gen_non_diffusive_2to1, device_ids=[rank]
     )
     disc_diffusive_1 = nn.parallel.DistributedDataParallel(
-        disc_diffusive_1, device_ids=[gpu]
+        disc_diffusive_1, device_ids=[rank]
     )
     disc_diffusive_2 = nn.parallel.DistributedDataParallel(
-        disc_diffusive_2, device_ids=[gpu]
+        disc_diffusive_2, device_ids=[rank]
     )
 
     disc_non_diffusive_cycle1 = nn.parallel.DistributedDataParallel(
-        disc_non_diffusive_cycle1, device_ids=[gpu]
+        disc_non_diffusive_cycle1, device_ids=[rank]
     )
     disc_non_diffusive_cycle2 = nn.parallel.DistributedDataParallel(
-        disc_non_diffusive_cycle2, device_ids=[gpu]
+        disc_non_diffusive_cycle2, device_ids=[rank]
     )
 
     exp = args.exp
@@ -508,9 +474,7 @@ def train_syndiff(rank, gpu, args):
         global_step, epoch, init_epoch = 0, 0, 0
 
     for epoch in range(init_epoch, args.num_epoch + 1):
-        train_sampler.set_epoch(epoch)
-
-        for iteration, (x1, x2) in enumerate(data_loader):
+        for iteration, batch in enumerate(tqdm(train_loader)):
             for p in disc_diffusive_1.parameters():
                 p.requires_grad = True
             for p in disc_diffusive_2.parameters():
@@ -522,6 +486,9 @@ def train_syndiff(rank, gpu, args):
 
             disc_diffusive_1.zero_grad()
             disc_diffusive_2.zero_grad()
+
+            x1 = batch[guidance_seq].float()
+            x2 = batch[target_seq].float()
 
             # sample from p(x_0)
             real_data1 = x1.to(device, non_blocking=True)
@@ -596,6 +563,7 @@ def train_syndiff(rank, gpu, args):
             latent_z1 = torch.randn(batch_size, nz, device=device)
             latent_z2 = torch.randn(batch_size, nz, device=device)
 
+            # ENTRYPOINT for modifications, replace x1_0_predict with actual images and concat additional channel for T1 + T2 conditioning
             x1_0_predict = gen_non_diffusive_2to1(real_data2)
             x2_0_predict = gen_non_diffusive_1to2(real_data1)
             # x_tp1 is concatenated with source contrast and x_0_predict is predicted
@@ -945,7 +913,10 @@ def train_syndiff(rank, gpu, args):
                         store_params_in_ema=True
                     )
 
-        for iteration, (x_val, y_val) in enumerate(data_loader_val):
+        for iteration, batch in enumerate(val_loader):
+            x_val = batch[guidance_seq].float()
+            y_val = batch[target_seq].float()
+
             real_data = x_val.to(device, non_blocking=True)
             source_data = y_val.to(device, non_blocking=True)
 
@@ -967,7 +938,10 @@ def train_syndiff(rank, gpu, args):
                 real_data, fake_sample1, data_range=real_data.max()
             )
 
-        for iteration, (y_val, x_val) in enumerate(data_loader_val):
+        for iteration, batch in enumerate(val_loader):
+            x_val = batch[guidance_seq].float()
+            y_val = batch[target_seq].float()
+
             real_data = x_val.to(device, non_blocking=True)
             source_data = y_val.to(device, non_blocking=True)
 
@@ -990,31 +964,8 @@ def train_syndiff(rank, gpu, args):
                 real_data, fake_sample1, data_range=real_data.max()
             )
 
-        print(np.nanmean(val_psnr_values[0, epoch, :]))
-        print(np.nanmean(val_psnr_values[1, epoch, :]))
-        np.save("{}/val_l1_loss.npy".format(exp_path), val_l1_loss)
-        np.save("{}/val_psnr_values.npy".format(exp_path), val_psnr_values)
 
 
-def init_processes(rank, size, fn, args):
-    """Initialize the distributed environment."""
-    os.environ["MASTER_ADDR"] = args.master_address
-    os.environ["MASTER_PORT"] = args.port_num
-    torch.cuda.set_device(args.local_rank)
-    gpu = args.local_rank
-    dist.init_process_group(
-        backend="nccl", init_method="env://", rank=rank, world_size=size
-    )
-    fn(rank, gpu, args)
-    dist.barrier()
-    cleanup()
-
-
-def cleanup():
-    dist.destroy_process_group()
-
-
-# %%
 if __name__ == "__main__":
     parser = argparse.ArgumentParser("syndiff parameters")
     parser.add_argument(
@@ -1023,7 +974,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--resume", action="store_true", default=False)
 
-    parser.add_argument("--image_size", type=int, default=32, help="size of image")
+    parser.add_argument("--image_size", type=int, default=256, help="size of image")
     parser.add_argument("--num_channels", type=int, default=3, help="channel of image")
     parser.add_argument(
         "--centered", action="store_false", default=True, help="-1,1 scale"
@@ -1169,9 +1120,6 @@ if __name__ == "__main__":
     )
     parser.add_argument("--node_rank", type=int, default=0, help="The index of node.")
     parser.add_argument(
-        "--local_rank", type=int, default=0, help="rank of process in the node"
-    )
-    parser.add_argument(
         "--master_address", type=str, default="127.0.0.1", help="address for master"
     )
     parser.add_argument(
@@ -1188,25 +1136,11 @@ if __name__ == "__main__":
     args.world_size = args.num_proc_node * args.num_process_per_node
     size = args.num_process_per_node
 
-    if size > 1:
-        processes = []
-        for rank in range(size):
-            args.local_rank = rank
-            global_rank = rank + args.node_rank * args.num_process_per_node
-            global_size = args.num_proc_node * args.num_process_per_node
-            args.global_rank = global_rank
-            print(
-                "Node rank %d, local proc %d, global proc %d"
-                % (args.node_rank, rank, global_rank)
-            )
-            p = Process(
-                target=init_processes,
-                args=(global_rank, global_size, train_syndiff, args),
-            )
-            p.start()
-            processes.append(p)
+    train_syndiff(args)
 
-        for p in processes:
-            p.join()
-    else:
-        init_processes(0, size, train_syndiff, args)
+# run with
+# CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 train.py \
+# --exp exp_syndiff --num_channels 2 --num_channels_dae 64 --ch_mult 1 1 2 2 4 4 --num_timesteps 4 \
+# --num_res_blocks 2 --batch_size 1 --num_epoch 500 --ngf 64 --embedding_type positional --use_ema --ema_decay 0.999 \
+# --r1_gamma 1. --z_emb_dim 256 --lr_d 1e-4 --lr_g 1.6e-4 --lazy_reg 10 --num_process_per_node 4 \
+# --save_content --output_path output
