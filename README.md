@@ -19,6 +19,22 @@ ninja
 python3.x-dev (apt install, x should match your python3 version, ex: 3.8)
 ```
 
+## Build the docker image
+
+This builds the docker image for the diffusion pipeline. The image is called icon.
+
+```bash
+$ docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) --build-arg USER=$USER -t $USER/icon .
+```
+
+## Run the docker image
+The docker can be easily run using the following alias (`runicon`).
+
+```bash
+```bashrc
+alias runicon='runicon_func() { GPU="$1"; GPU_ARG="\"device=$GPU\""; docker run --rm --user "$(id -u):$(id -g)" --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 -it -v /home/rassmanns/diffusion/SynDiff:/workspace/diffusion/SynDiff -v /home/rassmanns/diffusion/ResVit:/workspace/diffusion/ResViT -v /home/rassmanns/diffusion/data:/workspace/diffusion/data -v $(realpath /home/rassmanns/diffusion/data/RS/conformed_mask_reg):/workspace/diffusion/data/RS/conformed_mask_reg -v/localmount:/localmount  --name "$USER""_GPU_""${GPU//,/_}" --gpus "$GPU_ARG" $USER/icon bash; }; runicon_func'
+```
+
 ## Installation
 - Clone this repo:
 ```bash
