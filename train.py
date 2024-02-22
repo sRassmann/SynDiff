@@ -17,6 +17,11 @@ from torch.multiprocessing import Process
 import torch.distributed as dist
 import shutil
 from skimage.metrics import peak_signal_noise_ratio as psnr
+from image_similarity_measures.quality_metrics import ssim
+
+from torch.utils.tensorboard import SummaryWriter
+
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 def copy_source(file, output_dir):
@@ -235,11 +240,15 @@ def train_syndiff(args):
 
     nz = args.nz  # latent dimension
 
+    if rank == 0:
+        writer = SummaryWriter(log_dir=os.path.join(save_dir, "tb"))
+
     config.batch_size = batch_size
     train_loader, val_loader = create_loaders(**config)
 
     val_l1_loss = np.zeros([2, args.num_epoch, len(val_loader)])
     val_psnr_values = np.zeros([2, args.num_epoch, len(val_loader)])
+    val_ssim_values = np.zeros([2, args.num_epoch, len(val_loader)])
     to_range_0_1 = lambda x: (x + 1.0) / 2.0
 
     # networks performing reverse denoising
@@ -383,11 +392,12 @@ def train_syndiff(args):
     output_path = args.output_path
 
     exp_path = os.path.join(output_path, exp)
-    if rank == 0:
-        if not os.path.exists(exp_path):
-            os.makedirs(exp_path)
-            copy_source(__file__, exp_path)
-            shutil.copytree("./backbones", os.path.join(exp_path, "backbones"))
+    # version control
+    # if rank == 0:
+    #     if not os.path.exists(exp_path):
+    #         os.makedirs(exp_path)
+    #         copy_source(__file__, exp_path)
+    #         shutil.copytree("./backbones", os.path.join(exp_path, "backbones"))
 
     coeff = Diffusion_Coefficients(args, device)
     pos_coeff = Posterior_Coefficients(args, device)
@@ -730,21 +740,15 @@ def train_syndiff(args):
             optimizer_gen_non_diffusive_2to1.step()
 
             global_step += 1
-            if iteration % 100 == 0:
-                if rank == 0:
-                    print(
-                        "epoch {} iteration{}, G-Cycle: {}, G-L1: {}, G-Adv: {}, G-cycle-Adv: {}, G-Sum: {}, D Loss: {}, D_cycle Loss: {}".format(
-                            epoch,
-                            iteration,
-                            errG_cycle.item(),
-                            errG_L1.item(),
-                            errG_adv.item(),
-                            errG_cycle_adv.item(),
-                            errG.item(),
-                            errD.item(),
-                            errD_cycle.item(),
-                        )
-                    )
+            if rank == 0:
+                # use writer
+                writer.add_scalar("G-Cycle", errG_cycle.item(), global_step)
+                writer.add_scalar("G-L1", errG_L1.item(), global_step)
+                writer.add_scalar("G-Adv", errG_adv.item(), global_step)
+                writer.add_scalar("G-cycle-Adv", errG_cycle_adv.item(), global_step)
+                writer.add_scalar("G-Sum", errG.item(), global_step)
+                writer.add_scalar("D Loss", errD.item(), global_step)
+                writer.add_scalar("D_cycle Loss", errD_cycle.item(), global_step)
 
         if not args.no_lr_decay:
             scheduler_gen_diffusive_1.step()
@@ -899,7 +903,7 @@ def train_syndiff(args):
                         exp_path, "gen_non_diffusive_2to1_{}.pth".format(epoch)
                     ),
                 )
-                if args.use_ema:
+                if args.use_ema:  # ?
                     optimizer_gen_diffusive_1.swap_parameters_with_ema(
                         store_params_in_ema=True
                     )
@@ -937,10 +941,13 @@ def train_syndiff(args):
             val_psnr_values[0, epoch, iteration] = psnr(
                 real_data, fake_sample1, data_range=real_data.max()
             )
+            ssim_avg[0, epoch, iteration] = ssim(
+                real_data[:, 0].transpose(), fake_sample2[:, 0].transpose(), max_p=1
+            )
 
         for iteration, batch in enumerate(val_loader):
-            x_val = batch[guidance_seq].float()
-            y_val = batch[target_seq].float()
+            y_val = batch[guidance_seq].float()
+            x_val = batch[target_seq].float()
 
             real_data = x_val.to(device, non_blocking=True)
             source_data = y_val.to(device, non_blocking=True)
@@ -963,7 +970,28 @@ def train_syndiff(args):
             val_psnr_values[1, epoch, iteration] = psnr(
                 real_data, fake_sample1, data_range=real_data.max()
             )
+            ssim_avg[1, epoch, iteration] = ssim(
+                real_data[:, 0].transpose(), fake_sample2[:, 0].transpose(), max_p=1
+            )
 
+        writer.add_scalar(
+            f"Val PSNR {guidance_seq}", np.nanmean(val_psnr_values[0, epoch, :]), epoch
+        )
+        writer.add_scalar(
+            f"Val PSNR {target_seq}", np.nanmean(val_psnr_values[1, epoch, :]), epoch
+        )
+        writer.add_scalar(
+            f"Val L1 Loss {guidance_seq}", np.nanmean(val_l1_loss[0, epoch, :]), epoch
+        )
+        writer.add_scalar(
+            f"Val L1 Loss {target_seq}", np.nanmean(val_l1_loss[1, epoch, :]), epoch
+        )
+        writer.add_scalar(
+            f"Val SSIM {guidance_seq}", np.nanmean(ssim_avg[0, epoch, :]), epoch
+        )
+        writer.add_scalar(
+            f"Val SSIM {target_seq}", np.nanmean(ssim_avg[1, epoch, :]), epoch
+        )
 
 
 if __name__ == "__main__":
