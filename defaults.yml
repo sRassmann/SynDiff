@@ -1,7 +1,7 @@
 data:
   dataset: "../data/RS/RS_train_split.json"
   data_dir: "../data/RS/conformed_mask_reg"
-  batch_size: 1
+  batch_size: 12 # effective batch size using 8 GPUs: 96
   img_size:
     - 256
     - 256
@@ -13,5 +13,5 @@ data:
   guidance_sequences:
     - "t1"
     - "t2"
-  subset_train: null
+  subset_train: 1344
   subset_val: null
