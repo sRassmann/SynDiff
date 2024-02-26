@@ -226,14 +226,14 @@ def sample_and_test(args):
                 :, 0, offset_h : offset_h + h, offset_w : offset_w + w
             ].cpu()
 
-            vol["pred"] = torch.clamp(pred_vol, -1, 1)
-            save_output_volume(
-                vol,
-                output_path=os.path.join(exp_path, args.output_dir_name),
-                save_keys=list(config.data.guidance_sequences)
-                + ["pred", config.data.target_sequence, "mask"],
-                target_sequence=config.data.target_sequence,
-            )
+        vol["pred"] = torch.clamp(pred_vol, -1, 1)
+        save_output_volume(
+            vol,
+            output_path=os.path.join(exp_path, args.out_dir_name),
+            save_keys=list(config.data.guidance_sequences)
+            + ["pred", config.data.target_sequence, "mask"],
+            target_sequence=config.data.target_sequence,
+        )
 
 
 if __name__ == "__main__":
@@ -393,7 +393,7 @@ if __name__ == "__main__":
         help="path to the dataset directory",
     )
     parser.add_argument(
-        "--output_dir_name",
+        "--out_dir_name",
         type=str,
         default="inference",
         help="name of the output directory",
