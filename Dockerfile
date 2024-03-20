@@ -2,4 +2,4 @@
 FROM srassmann/dif:cu12
 
 #RUN #conda install cuda -c nvidia
-RUN pip install ninja h5py visdom dominate scikit-image scipy
+RUN pip install ninja h5py visdom dominate scikit-image scipy flopth==0.1.5

@@ -1,3 +1,5 @@
+import sys
+
 import argparse
 import torch
 import numpy as np
@@ -155,6 +157,16 @@ def load_checkpoint(checkpoint_dir, netG, name_of_network, epoch, device="cuda:0
         ckpt[key[7:]] = ckpt.pop(key)
     netG.load_state_dict(ckpt)
     netG.eval()
+
+    # from flopth import flopth
+    #
+    # image = torch.rand(1, 3, 256, 256)
+    # timestep = torch.Tensor((0,)).long()
+    # latent_z = torch.randn(image.size(0), 100, device=image.device)
+    # flops, params = flopth(netG, inputs=(image, timestep, latent_z), show_detail=True)
+    # print(f"FLOPs: {flops}, Params: {params}")
+    #
+    # sys.exit(0)
 
 
 # %%
