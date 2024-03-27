@@ -209,7 +209,7 @@ def sample_and_test(args):
         cache=None,
         subset_train=0,
         normalize_to=(-1, 1),
-        skull_strip=1,
+        skull_strip=config.data.skull_strip,
     )
 
     # test
