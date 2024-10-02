@@ -227,10 +227,7 @@ def sample_from_model(coefficients, generator, n_time, x, T, opt, rank=0):
     return x
 
 
-config = OmegaConf.load("defaults.yml")["data"]
-
-
-def train_syndiff(args):
+def train_syndiff(args, config):
     rank, world_size = setup_ddp()
     device = torch.device(f"cuda:{rank}")
 
@@ -306,29 +303,32 @@ def train_syndiff(args):
     T = get_time_schedule(args, device)
 
     if args.resume:
-        checkpoint_file = os.path.join(exp_path, "content.pth")
-        checkpoint = torch.load(checkpoint_file, map_location=device)
-        init_epoch = checkpoint["epoch"]
-        epoch = init_epoch
-        gen_diffusive_1.load_state_dict(checkpoint["gen_diffusive_1_dict"])
-        gen_diffusive_2.load_state_dict(checkpoint["gen_diffusive_2_dict"])
+        # checkpoint_file = os.path.join(exp_path, "content.pth")
+        # checkpoint = torch.load(checkpoint_file, map_location=device)
+        # init_epoch = checkpoint["epoch"]
+        # epoch = init_epoch
+        gen_diffusive_1.load_state_dict(
+            torch.load("output/exp_syndiff_bs_96/gen_diffusive_1_11400.pth")
+        )
 
-        optimizer_gen_diffusive_1.load_state_dict(
-            checkpoint["optimizer_gen_diffusive_1"]
-        )
-        scheduler_gen_diffusive_1.load_state_dict(
-            checkpoint["scheduler_gen_diffusive_1"]
-        )
+        # optimizer_gen_diffusive_1.load_state_dict(
+        #     checkpoint["optimizer_gen_diffusive_1"]
+        # )
+        # scheduler_gen_diffusive_1.load_state_dict(
+        #     checkpoint["scheduler_gen_diffusive_1"]
+        # )
         # load D
-        disc_diffusive_1.load_state_dict(checkpoint["disc_diffusive_1_dict"])
-        optimizer_disc_diffusive_1.load_state_dict(
-            checkpoint["optimizer_disc_diffusive_1"]
-        )
-        scheduler_disc_diffusive_1.load_state_dict(
-            checkpoint["scheduler_disc_diffusive_1"]
-        )
-        global_step = checkpoint["global_step"]
-        print("=> loaded checkpoint (epoch {})".format(checkpoint["epoch"]))
+        # disc_diffusive_1.load_state_dict(checkpoint["disc_diffusive_1_dict"])
+        # optimizer_disc_diffusive_1.load_state_dict(
+        #     checkpoint["optimizer_disc_diffusive_1"]
+        # )
+        # scheduler_disc_diffusive_1.load_state_dict(
+        #     checkpoint["scheduler_disc_diffusive_1"]
+        # )
+        # global_step = checkpoint["global_step"]
+        init_epoch = 11400
+        global_step = init_epoch * len(train_loader)
+        print("=> loaded checkpoint (epoch {})".format(init_epoch))
     else:
         global_step, epoch, init_epoch = 0, 0, 0
 
@@ -682,10 +682,11 @@ if __name__ == "__main__":
         default=0.5,
         help="weightening of l1 loss part of diffusion ans cycle models",
     )
+    parser.add_argument("--config", type=str, default="defaults.yml")
 
     args = parser.parse_args()
-
-    train_syndiff(args)
+    config = OmegaConf.load(args.config)["data"]
+    train_syndiff(args, config)
 
 # run with smth like:
 # CUDA_VISIBLE_DEVICES=0,1,2,4,5,6,7 torchrun --nproc_per_node=8 train_paired.py \

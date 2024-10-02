@@ -1,0 +1,21 @@
+data:
+  dataset: "../data/BraTS/brats23_train.json"
+  data_dir: "../data/BraTS/brats23_conformed"
+  batch_size: 12 # effective batch size using 8 GPUs: 96
+  img_size:
+    - 256
+    - 256
+  skull_strip: 0
+  crop_to_brain_margin:
+    - 0
+    - 0
+    - 0
+  num_workers: 4
+  slice_thickness: 1
+  cache: "processes"
+  target_sequence: "flair"
+  guidance_sequences:
+    - "t1"
+    - "t2"
+  subset_train: 8
+  subset_val: 8
