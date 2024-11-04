@@ -17,5 +17,5 @@ data:
   guidance_sequences:
     - "t1"
     - "t2"
-  subset_train: 8
-  subset_val: 8
+#  subset_train: 8
+#  subset_val: 8

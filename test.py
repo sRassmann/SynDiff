@@ -15,8 +15,6 @@ from tqdm import tqdm
 
 from train_paired import sample_from_model
 
-config = OmegaConf.load("defaults.yml")
-
 
 def psnr(img1, img2):
     # Peak Signal to Noise Ratio
@@ -170,7 +168,7 @@ def load_checkpoint(checkpoint_dir, netG, name_of_network, epoch, device="cuda:0
 
 
 # %%
-def sample_and_test(args):
+def sample_and_test(args, config):
     target_seq = config.data.target_sequence
     guidance_seqs = config.data.guidance_sequences
 
@@ -182,6 +180,7 @@ def sample_and_test(args):
     epoch_chosen = args.which_epoch
 
     # Initializing and loading network
+    args.image_size = config.data.img_size[0]
     gen_diffusive_1 = NCSNpp(args).to(device)
 
     exp = args.exp
@@ -209,8 +208,10 @@ def sample_and_test(args):
         cache=None,
         subset_train=0,
         normalize_to=(-1, 1),
-        skull_strip=config.data.skull_strip,
+        skull_strip=not args.no_skull_strip,
     )
+
+    img_size = config.data.img_size[0]
 
     # test
     for i, vol in enumerate(tqdm(val)):
@@ -223,13 +224,13 @@ def sample_and_test(args):
             b, c, h, w = g.shape
 
             # pad to batch size, 2, 256, 256
-            pad = -torch.ones([b, c, 256, 256])
-            offset_h = (256 - h) // 2
-            offset_w = (256 - w) // 2
+            pad = -torch.ones([b, c, img_size, img_size])
+            offset_h = (img_size - h) // 2
+            offset_w = (img_size - w) // 2
             pad[:, :, offset_h : offset_h + h, offset_w : offset_w + w] = g
             pad = pad.to(device)
 
-            noise = torch.randn((b, 1, 256, 256), device=device)
+            noise = torch.randn((b, 1, img_size, img_size), device=device)
             x1_t = torch.cat([noise, pad], axis=1)
             pred_batch = sample_from_model(
                 pos_coeff, gen_diffusive_1, args.num_timesteps, x1_t, T, args
@@ -410,7 +411,15 @@ if __name__ == "__main__":
         default="inference",
         help="name of the output directory",
     )
+    parser.add_argument(
+        "--no_skull_strip",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--config", type=str, default="config.yaml", help="path to the config"
+    )
 
     args = parser.parse_args()
 
-    sample_and_test(args)
+    config = OmegaConf.load(args.config)
+    sample_and_test(args, config)
