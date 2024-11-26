@@ -5,7 +5,7 @@ data:
   img_size:
     - 256
     - 256
-  skull_strip: false
+  skull_strip: true
   num_workers: 4
   slice_thickness: 1
   cache: "persistent"
